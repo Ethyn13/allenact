@@ -502,7 +502,9 @@ class OnPolicyRunner(object):
         valid_on_initial_weights: bool = False,
         try_restart_after_task_error: bool = False,
         save_ckpt_at_every_host: bool = False,
+        cost_limit: float = None,
     ):
+        assert cost_limit is not None, "cost_limit must be set"
         self._initialize_start_train_or_start_test()
 
         self._collect_valid_results = collect_valid_results
@@ -574,6 +576,7 @@ class OnPolicyRunner(object):
                 valid_on_initial_weights=valid_on_initial_weights,
                 try_restart_after_task_error=try_restart_after_task_error,
                 save_ckpt_at_every_host=save_ckpt_at_every_host,
+                cost_limit=cost_limit,
             )
             train: BaseProcess = self.mp_ctx.Process(
                 target=self.train_loop,
@@ -1226,6 +1229,7 @@ class OnPolicyRunner(object):
                     checkpoint_file_name=checkpoint_file_name[0],
                     tasks_data=tasks_callback_data,
                     scalar_name_to_total_experiences_key=scalar_name_to_total_experiences_key,
+                    checkpoints_dir=self.checkpoint_dir(),
                 )
 
             if mode == VALID_MODE_STR:

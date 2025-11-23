@@ -685,8 +685,11 @@ class OnPolicyRLEngine(object):
         for step_result in outputs:
             if step_result.info is not None:
                 if COMPLETE_TASK_METRICS_KEY in step_result.info:
+                    new_metrics = step_result.info[COMPLETE_TASK_METRICS_KEY]
+                    if hasattr(self, "_lagrange"):
+                        new_metrics["lagrangian_multiplier"] = self._lagrange.lagrangian_multiplier.item()
                     self.single_process_metrics.append(
-                        step_result.info[COMPLETE_TASK_METRICS_KEY]
+                        new_metrics
                     )
                     del step_result.info[COMPLETE_TASK_METRICS_KEY]
                 if COMPLETE_TASK_CALLBACK_KEY in step_result.info:
@@ -858,7 +861,15 @@ class OnPolicyRLEngine(object):
                 )
             )
         # self._lagrange.update_lagrange_multiplier(self.distributed_weighted_sum(self.training_pipeline.current_stage_storage[self.training_pipeline.rollout_storage_uuid].costs.mean(), 1/self.num_workers))
-        self._lagrange.update_lagrange_multiplier(self.training_pipeline.current_stage_storage[self.training_pipeline.rollout_storage_uuid].costs.mean())
+        costs = self.training_pipeline.current_stage_storage[self.training_pipeline.rollout_storage_uuid].costs
+
+        costs_summed_over_steps = costs.sum(dim=0)
+
+        costs_mean = costs_summed_over_steps.mean()
+
+        self._lagrange.update_lagrange_multiplier(costs_mean)
+        # self._lagrange.update_lagrange_multiplier(self.training_pipeline.current_stage_storage[self.training_pipeline.rollout_storage_uuid].costs.mean())
+        # print(costs_mean)
         training_settings = stage_component.training_settings
 
         loss_names = stage_component.loss_names
@@ -1000,6 +1011,9 @@ class OnPolicyRLEngine(object):
                             batch=batch,
                             actor_critic_output=actor_critic_output_for_batch,
                             lagrangian_multiplier=self._lagrange.lagrangian_multiplier,
+                            cost_limit = self._lagrange.cost_limit,
+                            lambda_lr = self._lagrange.lambda_lr, 
+                            ep_costs = costs_mean,
                         )
 
                         per_epoch_info = {}
@@ -1242,7 +1256,7 @@ class OnPolicyTrainer(OnPolicyRLEngine):
             )
         )
         self._lagrange: Lagrange = Lagrange(**{
-            "cost_limit": 25.0,
+            "cost_limit": kwargs["cost_limit"],
             "lagrangian_multiplier_init": 0.001,
             "lambda_lr": 0.035,
             "lambda_optimizer": "Adam",
@@ -1376,9 +1390,7 @@ class OnPolicyTrainer(OnPolicyRLEngine):
         return logging_pkg
 
     def checkpoint_save(self, pipeline_stage_index: Optional[int] = None) -> str:
-        model_path = os.path.join(
-            self.checkpoints_dir,
-            "exp_{}__stage_{:02d}__steps_{:012d}.pt".format(
+        model_name = "exp_{}__stage_{:02d}__steps_{:012d}.pt".format(
                 self.experiment_name,
                 (
                     self.training_pipeline.current_stage_index
@@ -1386,7 +1398,10 @@ class OnPolicyTrainer(OnPolicyRLEngine):
                     else pipeline_stage_index
                 ),
                 self.training_pipeline.total_steps,
-            ),
+            )
+        model_path = os.path.join(
+            self.checkpoints_dir,
+            model_name,
         )
 
         save_dict = {
@@ -1403,6 +1418,7 @@ class OnPolicyTrainer(OnPolicyRLEngine):
             ).state_dict()
 
         torch.save(save_dict, model_path)
+
         return model_path
 
     def checkpoint_load(
