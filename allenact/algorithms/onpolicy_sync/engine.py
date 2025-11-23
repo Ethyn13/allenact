@@ -26,6 +26,7 @@ from allenact.algorithms.onpolicy_sync.misc import TrackingInfo, TrackingInfoTyp
 from allenact.base_abstractions.sensor import Sensor
 from allenact.utils.misc_utils import str2bool
 from allenact.utils.model_utils import md5_hash_of_state_dict
+from omnisafe.common.lagrange import Lagrange
 
 try:
     # noinspection PyProtectedMember,PyUnresolvedReferences
@@ -653,7 +654,7 @@ class OnPolicyRLEngine(object):
                     # noinspection PyAttributeOutsideInit
                     self._probe_steps = -self._probe_steps
 
-    def collect_step_across_all_task_samplers(
+    def  collect_step_across_all_task_samplers(
         self,
         rollout_storage_uuid: str,
         uuid_to_storage: Dict[str, ExperienceStorage],
@@ -695,10 +696,18 @@ class OnPolicyRLEngine(object):
                     del step_result.info[COMPLETE_TASK_CALLBACK_KEY]
 
         rewards: Union[List, torch.Tensor]
-        observations, rewards, dones, infos = [list(x) for x in zip(*outputs)]
+        costs: Union[List, torch.Tensor]
+
+        observations, rewards, costs, dones, infos = [list(x) for x in zip(*outputs)]
 
         rewards = torch.tensor(
             rewards,
+            dtype=torch.float,
+            device=self.device,  # type:ignore
+        )
+
+        costs = torch.tensor(
+            costs,
             dtype=torch.float,
             device=self.device,  # type:ignore
         )
@@ -708,6 +717,12 @@ class OnPolicyRLEngine(object):
             # Rewards are of shape [sampler,]
             rewards = rewards.unsqueeze(-1)
         elif len(rewards.shape) > 1:
+            raise NotImplementedError()
+
+        if len(costs.shape) == 1:
+            # Costs are of shape [sampler,]
+            costs = costs.unsqueeze(-1)
+        elif len(costs.shape) > 1:
             raise NotImplementedError()
 
         # If done then clean the history of observations.
@@ -753,7 +768,9 @@ class OnPolicyRLEngine(object):
                 0, keep
             ],
             value_preds=actor_critic_output.values[0, keep],
+            c_value_preds=actor_critic_output.c_values[0, keep],
             rewards=rewards[keep],
+            costs=costs[keep],
             masks=masks[keep],
         )
         for storage in uuid_to_storage.values():
@@ -840,7 +857,8 @@ class OnPolicyRLEngine(object):
                     None if self.device == torch.device("cpu") else [self.device.index]
                 )
             )
-
+        # self._lagrange.update_lagrange_multiplier(self.distributed_weighted_sum(self.training_pipeline.current_stage_storage[self.training_pipeline.rollout_storage_uuid].costs.mean(), 1/self.num_workers))
+        self._lagrange.update_lagrange_multiplier(self.training_pipeline.current_stage_storage[self.training_pipeline.rollout_storage_uuid].costs.mean())
         training_settings = stage_component.training_settings
 
         loss_names = stage_component.loss_names
@@ -981,6 +999,7 @@ class OnPolicyRLEngine(object):
                             step_count=self.step_count,
                             batch=batch,
                             actor_critic_output=actor_critic_output_for_batch,
+                            lagrangian_multiplier=self._lagrange.lagrangian_multiplier,
                         )
 
                         per_epoch_info = {}
@@ -1222,6 +1241,12 @@ class OnPolicyTrainer(OnPolicyRLEngine):
                 params=[p for p in self.actor_critic.parameters() if p.requires_grad]
             )
         )
+        self._lagrange: Lagrange = Lagrange(**{
+            "cost_limit": 25.0,
+            "lagrangian_multiplier_init": 0.001,
+            "lambda_lr": 0.035,
+            "lambda_optimizer": "Adam",
+        })
 
         # noinspection PyProtectedMember
         self.lr_scheduler: Optional[_LRScheduler] = None
@@ -1688,6 +1713,7 @@ class OnPolicyTrainer(OnPolicyRLEngine):
 
                 before_update_info = dict(
                     next_value=None,
+                    next_c_value=None,
                     use_gae=cur_stage_training_settings.use_gae,
                     gamma=cur_stage_training_settings.gamma,
                     tau=cur_stage_training_settings.gae_lambda,
@@ -1696,6 +1722,7 @@ class OnPolicyTrainer(OnPolicyRLEngine):
             else:
                 vector_tasks_already_restarted = False
                 step = -1
+                
                 while step < cur_stage_training_settings.num_steps - 1:
                     step += 1
 
@@ -1801,6 +1828,7 @@ class OnPolicyTrainer(OnPolicyRLEngine):
 
                 before_update_info = dict(
                     next_value=actor_critic_output.values.detach(),
+                    next_c_value=actor_critic_output.c_values.detach(),
                     use_gae=cur_stage_training_settings.use_gae,
                     gamma=cur_stage_training_settings.gamma,
                     tau=cur_stage_training_settings.gae_lambda,
@@ -2121,6 +2149,7 @@ class OnPolicyInference(OnPolicyRLEngine):
                         )
                         before_update_info = dict(
                             next_value=actor_critic_output.values.detach(),
+                            next_c_value=actor_critic_output.c_values.detach(),
                             use_gae=eval_pipeline_stage.training_settings.use_gae,
                             gamma=eval_pipeline_stage.training_settings.gamma,
                             tau=eval_pipeline_stage.training_settings.gae_lambda,
@@ -2241,6 +2270,7 @@ class OnPolicyInference(OnPolicyRLEngine):
             while not offpolicy_eval_done:
                 before_update_info = dict(
                     next_value=None,
+                    next_c_value=None,
                     use_gae=eval_pipeline_stage.training_settings.use_gae,
                     gamma=eval_pipeline_stage.training_settings.gamma,
                     tau=eval_pipeline_stage.training_settings.gae_lambda,

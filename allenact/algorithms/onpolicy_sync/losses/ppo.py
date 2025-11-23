@@ -220,4 +220,61 @@ class PPOValue(AbstractActorCriticLoss):
         )
 
 
+class SafePPOValue(AbstractActorCriticLoss):
+    """Implementation of the Proximal Policy Optimization loss.
+
+    # Attributes
+
+    clip_param : The clipping parameter to use.
+    use_clipped_value_loss : Whether or not to also clip the value loss.
+    """
+
+    def __init__(
+        self,
+        clip_param: float,
+        use_clipped_value_loss=True,
+        clip_decay: Optional[Callable[[int], float]] = None,
+        *args,
+        **kwargs
+    ):
+        """Initializer.
+
+        See the class documentation for parameter definitions.
+        """
+        super().__init__(*args, **kwargs)
+        self.clip_param = clip_param
+        self.use_clipped_value_loss = use_clipped_value_loss
+        self.clip_decay = clip_decay if clip_decay is not None else (lambda x: 1.0)
+
+    def loss(  # type: ignore
+        self,
+        step_count: int,
+        batch: ObservationType,
+        actor_critic_output: ActorCriticOutput[CategoricalDistr],
+        *args,
+        **kwargs
+    ):
+        c_values = actor_critic_output.c_values
+        clip_param = self.clip_param * self.clip_decay(step_count)
+
+        if self.use_clipped_value_loss:
+            c_value_pred_clipped = batch["c_values"] + (c_values - batch["c_values"]).clamp(
+                -clip_param, clip_param
+            )
+            c_value_losses = (c_values - batch["c_returns"]).pow(2)
+            c_value_losses_clipped = (c_value_pred_clipped - batch["c_returns"]).pow(2)
+            c_value_loss = 0.5 * torch.max(c_value_losses, c_value_losses_clipped).mean()
+        else:
+            c_value_loss = (
+                0.5 * (cast(torch.FloatTensor, batch["c_returns"]) - c_values).pow(2).mean()
+            )
+
+        return (
+            c_value_loss,
+            {
+                "c_value": c_value_loss.item(),
+            },
+        )
+
+
 PPOConfig = dict(clip_param=0.1, value_loss_coef=0.5, entropy_coef=0.01)

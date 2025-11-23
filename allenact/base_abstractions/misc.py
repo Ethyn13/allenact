@@ -51,6 +51,40 @@ class RLStepResult(NamedTuple):
             },
         )
 
+class SafeRLStepResult(NamedTuple):
+    observation: Optional[Any]
+    reward: Optional[Union[float, List[float]]]
+    cost: Optional[Union[float, List[float]]]
+    done: Optional[bool]
+    info: Optional[Dict[str, Any]]
+
+    def clone(self, new_info: Dict[str, Any]):
+        return SafeRLStepResult(
+            observation=(
+                self.observation
+                if "observation" not in new_info
+                else new_info["observation"]
+            ),
+            reward=self.reward if "reward" not in new_info else new_info["reward"],
+            cost=self.cost if "cost" not in new_info else new_info["cost"],
+            done=self.done if "done" not in new_info else new_info["done"],
+            info=self.info if "info" not in new_info else new_info["info"],
+        )
+
+    def merge(self, other: "SafeRLStepResult"):
+        return SafeRLStepResult(
+            observation=(
+                self.observation if other.observation is None else other.observation
+            ),
+            reward=self.reward if other.reward is None else other.reward,
+            cost=self.cost if other.cost is None else other.cost,
+            done=self.done if other.done is None else other.done,
+            info={
+                **(self.info if self.info is not None else {}),
+                **(other.info if other is not None else {}),
+            },
+        )
+
 
 class ActorCriticOutput(tuple, Generic[DistributionType]):
     distributions: DistributionType
@@ -74,6 +108,35 @@ class ActorCriticOutput(tuple, Generic[DistributionType]):
         return (
             f"Group(distributions={self.distributions},"
             f" values={self.values},"
+            f" extras={self.extras})"
+        )
+
+class SafeActorCriticOutput(tuple, Generic[DistributionType]):
+    distributions: DistributionType
+    values: torch.FloatTensor
+    c_values: torch.FloatTensor
+    extras: Dict[str, Any]
+
+    # noinspection PyTypeChecker
+    def __new__(
+        cls,
+        distributions: DistributionType,
+        values: torch.FloatTensor,
+        c_values: torch.FloatTensor,
+        extras: Dict[str, Any],
+    ):
+        self = tuple.__new__(cls, (distributions, values, c_values, extras))
+        self.distributions = distributions
+        self.values = values
+        self.c_values = c_values
+        self.extras = extras
+        return self
+
+    def __repr__(self) -> str:
+        return (
+            f"Group(distributions={self.distributions},"
+            f" values={self.values},"
+            f" c_values={self.c_values},"
             f" extras={self.extras})"
         )
 

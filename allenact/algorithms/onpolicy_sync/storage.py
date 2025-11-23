@@ -44,7 +44,9 @@ class ExperienceStorage(abc.ABC):
         actions: torch.Tensor,
         action_log_probs: torch.Tensor,
         value_preds: torch.Tensor,
+        c_value_preds: torch.Tensor,
         rewards: torch.Tensor,
+        costs: torch.Tensor,
         masks: torch.Tensor,
     ):
         """
@@ -152,8 +154,11 @@ class RolloutBlockStorage(RolloutStorage, MiniBatchStorageMixin):
         self._observations_full: Memory = Memory()
 
         self._value_preds_full: Optional[torch.Tensor] = None
+        self._c_value_preds_full: Optional[torch.Tensor] = None
         self._returns_full: Optional[torch.Tensor] = None
+        self._c_returns_full: Optional[torch.Tensor] = None
         self._rewards_full: Optional[torch.Tensor] = None
+        self._costs_full: Optional[torch.Tensor] = None
         self._action_log_probs_full: Optional[torch.Tensor] = None
 
         self.step = 0
@@ -164,7 +169,9 @@ class RolloutBlockStorage(RolloutStorage, MiniBatchStorageMixin):
         # self._advantages and self._normalized_advantages are only computed
         # when `before_updates` is called
         self._advantages: Optional[torch.Tensor] = None
+        self._c_advantages: Optional[torch.Tensor] = None
         self._normalized_advantages: Optional[torch.Tensor] = None
+        self._c_normalized_advantages: Optional[torch.Tensor] = None
 
         self._masks_full: Optional[torch.Tensor] = None
         self._actions_full: Optional[torch.Tensor] = None
@@ -223,12 +230,24 @@ class RolloutBlockStorage(RolloutStorage, MiniBatchStorageMixin):
         return self._value_preds_full[: self.step + 1]
 
     @property
+    def c_value_preds(self) -> torch.Tensor:
+        return self._c_value_preds_full[: self.step + 1]
+
+    @property
     def rewards(self) -> torch.Tensor:
         return self._rewards_full[: self.step]
 
     @property
+    def costs(self) -> torch.Tensor:
+        return self._costs_full[: self.step]
+
+    @property
     def returns(self) -> torch.Tensor:
         return self._returns_full[: self.step + 1]
+
+    @property
+    def c_returns(self) -> torch.Tensor:
+        return self._c_returns_full[: self.step + 1]
 
     @property
     def action_log_probs(self) -> torch.Tensor:
@@ -284,8 +303,11 @@ class RolloutBlockStorage(RolloutStorage, MiniBatchStorageMixin):
             "_prev_actions_full",
             "_masks_full",
             "_rewards_full",
+            "_costs_full",
             "_value_preds_full",
+            "_c_value_preds_full",
             "_returns_full",
+            "_c_returns_full",
             "_action_log_probs_full",
         ]:
             val = getattr(self, key)
@@ -429,8 +451,11 @@ class RolloutBlockStorage(RolloutStorage, MiniBatchStorageMixin):
         self._masks_full = pad_tensor_with_zeros(self._masks_full)
 
         self._rewards_full = pad_tensor_with_zeros(self._rewards_full)
+        self._costs_full = pad_tensor_with_zeros(self._costs_full)
         self._value_preds_full = pad_tensor_with_zeros(self._value_preds_full)
+        self._c_value_preds_full = pad_tensor_with_zeros(self._c_value_preds_full)
         self._returns_full = pad_tensor_with_zeros(self._returns_full)
+        self._c_returns_full = pad_tensor_with_zeros(self._c_returns_full)
         self._action_log_probs_full = pad_tensor_with_zeros(self._action_log_probs_full)
 
         self.full_size *= 2
@@ -442,7 +467,9 @@ class RolloutBlockStorage(RolloutStorage, MiniBatchStorageMixin):
         actions: torch.Tensor,
         action_log_probs: torch.Tensor,
         value_preds: torch.Tensor,
+        c_value_preds: torch.Tensor,
         rewards: torch.Tensor,
+        costs: torch.Tensor,
         masks: torch.Tensor,
     ):
         """See `ExperienceStorage.add` documentation."""
@@ -474,12 +501,24 @@ class RolloutBlockStorage(RolloutStorage, MiniBatchStorageMixin):
                 self.full_size, rewards.unsqueeze(0)
             )  # add step
 
+            self._costs_full = self.create_tensor_storage(
+                self.full_size, costs.unsqueeze(0)
+            )  # add step
+
             value_returns_template = value_preds.unsqueeze(0)  # add step
             self._value_preds_full = self.create_tensor_storage(
                 self.full_size + 1, value_returns_template
             )
+            c_value_returns_template = c_value_preds.unsqueeze(0)  # add step
+            self._c_value_preds_full = self.create_tensor_storage(
+                self.full_size + 1, c_value_returns_template
+            )
+
             self._returns_full = self.create_tensor_storage(
                 self.full_size + 1, value_returns_template
+            )
+            self._c_returns_full = self.create_tensor_storage(
+                self.full_size + 1, c_value_returns_template
             )
 
             self._action_log_probs_full = self.create_tensor_storage(
@@ -487,7 +526,9 @@ class RolloutBlockStorage(RolloutStorage, MiniBatchStorageMixin):
             )
 
         self._value_preds_full[self.step].copy_(value_preds)  # type:ignore
+        self._c_value_preds_full[self.step].copy_(c_value_preds)  # type:ignore
         self._rewards_full[self.step].copy_(rewards)  # type:ignore
+        self._costs_full[self.step].copy_(costs)  # type:ignore
         self._action_log_probs_full[self.step].copy_(  # type:ignore
             action_log_probs
         )
@@ -498,6 +539,8 @@ class RolloutBlockStorage(RolloutStorage, MiniBatchStorageMixin):
         # We set the below to be None just for extra safety.
         self._advantages = None
         self._normalized_advantages = None
+        self._c_advantages = None
+        self._c_normalized_advantages = None
 
     def sampler_select(self, keep_list: Sequence[int]):
         keep_list = list(keep_list)
@@ -513,13 +556,17 @@ class RolloutBlockStorage(RolloutStorage, MiniBatchStorageMixin):
 
         if self._rewards_full is not None:
             self._value_preds_full = self._value_preds_full[:, keep_list]
+            self._c_value_preds_full = self._c_value_preds_full[:, keep_list]
             self._rewards_full = self._rewards_full[:, keep_list]
+            self._costs_full = self._costs_full[:, keep_list]
             self._returns_full = self._returns_full[:, keep_list]
+            self._c_returns_full = self._c_returns_full[:, keep_list]
 
     def before_updates(
         self,
         *,
         next_value: torch.Tensor,
+        next_c_value: torch.Tensor,
         use_gae: bool,
         gamma: float,
         tau: float,
@@ -529,16 +576,23 @@ class RolloutBlockStorage(RolloutStorage, MiniBatchStorageMixin):
         assert len(kwargs) == 0
         self.compute_returns(
             next_value=next_value,
+            next_c_value=next_c_value,
             use_gae=use_gae,
             gamma=gamma,
             tau=tau,
         )
 
         self._advantages = self.returns[:-1] - self.value_preds[:-1]
+        self._c_advantages = self.c_returns[:-1] - self.c_value_preds[:-1]
 
         adv_stats = adv_stats_callback(self._advantages)
         self._normalized_advantages = (self._advantages - adv_stats["mean"]) / (
             adv_stats["std"] + 1e-5
+        )
+
+        c_adv_stats = adv_stats_callback(self._c_advantages) # TODO: check if this is correct
+        self._c_normalized_advantages = (self._c_advantages - c_adv_stats["mean"]) / (
+            c_adv_stats["std"] + 1e-5
         )
 
         self._before_update_called = True
@@ -559,6 +613,8 @@ class RolloutBlockStorage(RolloutStorage, MiniBatchStorageMixin):
         self._before_update_called = False
         self._advantages = None
         self._normalized_advantages = None
+        self._c_advantages = None
+        self._c_normalized_advantages = None
         self.step = 0
 
     @staticmethod
@@ -570,7 +626,7 @@ class RolloutBlockStorage(RolloutStorage, MiniBatchStorageMixin):
         return stored_tensor.view(*extended_shape)
 
     def compute_returns(
-        self, next_value: torch.Tensor, use_gae: bool, gamma: float, tau: float
+        self, next_value: torch.Tensor, next_c_value: torch.Tensor, use_gae: bool, gamma: float, tau: float
     ):
         extended_mask = self._extend_tensor_with_ones(
             self.masks, desired_num_dims=len(self.value_preds.shape)
@@ -578,10 +634,15 @@ class RolloutBlockStorage(RolloutStorage, MiniBatchStorageMixin):
         extended_rewards = self._extend_tensor_with_ones(
             self.rewards, desired_num_dims=len(self.value_preds.shape)
         )
+        extended_costs = self._extend_tensor_with_ones(
+            self.costs, desired_num_dims=len(self.c_value_preds.shape)
+        )
 
         if use_gae:
             self.value_preds[-1] = next_value
+            self.c_value_preds[-1] = next_c_value
             gae = 0
+            c_gae = 0
             for step in reversed(range(extended_rewards.shape[0])):
                 delta = (
                     extended_rewards[step]
@@ -590,12 +651,26 @@ class RolloutBlockStorage(RolloutStorage, MiniBatchStorageMixin):
                 )
                 gae = delta + gamma * tau * extended_mask[step + 1] * gae  # type:ignore
                 self.returns[step] = gae + self.value_preds[step]
+
+                c_delta = (
+                    extended_costs[step]
+                    + gamma * self.c_value_preds[step + 1] * extended_mask[step + 1]
+                    - self.c_value_preds[step]
+                )
+                c_gae = c_delta + gamma * tau * extended_mask[step + 1] * c_gae  # type:ignore
+                self.c_returns[step] = c_gae + self.c_value_preds[step]
         else:
             self.returns[-1] = next_value
+            self.c_returns[-1] = next_c_value
             for step in reversed(range(extended_rewards.shape[0])):
                 self.returns[step] = (
                     self.returns[step + 1] * gamma * extended_mask[step + 1]
                     + extended_rewards[step]
+                )
+
+                self.c_returns[step] = (
+                    self.c_returns[step + 1] * gamma * extended_mask[step + 1]
+                    + extended_costs[step]
                 )
 
     def batched_experience_generator(
@@ -632,33 +707,45 @@ class RolloutBlockStorage(RolloutStorage, MiniBatchStorageMixin):
             actions_batch = []
             prev_actions_batch = []
             value_preds_batch = []
+            c_value_preds_batch = []
             return_batch = []
+            c_return_batch = []
             masks_batch = []
             old_action_log_probs_batch = []
             adv_targ = []
             norm_adv_targ = []
+            c_adv_targ = []
+            c_norm_adv_targ = []
 
             for ind in cur_samplers:
                 actions_batch.append(self.actions[:, ind])
                 prev_actions_batch.append(self.prev_actions[:-1, ind])
                 value_preds_batch.append(self.value_preds[:-1, ind])
+                c_value_preds_batch.append(self.c_value_preds[:-1, ind])
                 return_batch.append(self.returns[:-1, ind])
+                c_return_batch.append(self.c_returns[:-1, ind])
                 masks_batch.append(self.masks[:-1, ind])
                 old_action_log_probs_batch.append(self.action_log_probs[:, ind])
 
                 adv_targ.append(self._advantages[:, ind])
+                c_adv_targ.append(self._c_advantages[:, ind])
                 norm_adv_targ.append(self._normalized_advantages[:, ind])
+                c_norm_adv_targ.append(self._c_normalized_advantages[:, ind])
 
             actions_batch = torch.stack(actions_batch, 1)  # type:ignore
             prev_actions_batch = torch.stack(prev_actions_batch, 1)  # type:ignore
             value_preds_batch = torch.stack(value_preds_batch, 1)  # type:ignore
+            c_value_preds_batch = torch.stack(c_value_preds_batch, 1)  # type:ignore
             return_batch = torch.stack(return_batch, 1)  # type:ignore
+            c_return_batch = torch.stack(c_return_batch, 1)  # type:ignore
             masks_batch = torch.stack(masks_batch, 1)  # type:ignore
             old_action_log_probs_batch = torch.stack(  # type:ignore
                 old_action_log_probs_batch, 1
             )
             adv_targ = torch.stack(adv_targ, 1)  # type:ignore
             norm_adv_targ = torch.stack(norm_adv_targ, 1)  # type:ignore
+            c_adv_targ = torch.stack(c_adv_targ, 1)  # type:ignore
+            c_norm_adv_targ = torch.stack(c_norm_adv_targ, 1)  # type:ignore
 
             yield {
                 "observations": observations_batch,
@@ -666,11 +753,15 @@ class RolloutBlockStorage(RolloutStorage, MiniBatchStorageMixin):
                 "actions": su.unflatten(self.action_space, actions_batch),
                 "prev_actions": su.unflatten(self.action_space, prev_actions_batch),
                 "values": value_preds_batch,
+                "c_values": c_value_preds_batch,
                 "returns": return_batch,
+                "c_returns": c_return_batch,
                 "masks": masks_batch,
                 "old_action_log_probs": old_action_log_probs_batch,
                 "adv_targ": adv_targ,
+                "c_adv_targ": c_adv_targ,
                 "norm_adv_targ": norm_adv_targ,
+                "c_norm_adv_targ": c_norm_adv_targ,
                 "bsize": int(np.prod(masks_batch.shape[:2])),
             }
 
